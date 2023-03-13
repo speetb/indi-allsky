@@ -1,5 +1,3 @@
-import os
-import errno
 import io
 import json
 import re
@@ -59,6 +57,7 @@ from sqlalchemy import func
 
 from .exceptions import CalibrationNotFound
 from .exceptions import TimeOutException
+from .exceptions import BadImage
 
 
 try:
@@ -133,7 +132,6 @@ class ImageWorker(Process):
         self.target_adu_found = False
         self.current_adu_target = 0
         self.hist_adu = []
-        self.target_adu = float(self.config['TARGET_ADU'])
 
         self.image_count = 0
 
@@ -286,7 +284,13 @@ class ImageWorker(Process):
         processing_start = time.time()
 
 
-        self.image_processor.add(filename_p, exposure, exp_date, exp_elapsed, camera)
+        try:
+            self.image_processor.add(filename_p, exposure, exp_date, exp_elapsed, camera)
+        except BadImage as e:
+            logger.error('Bad Image: %s', str(e))
+            #task.setFailed('Bad Image: {0:s}'.format(str(filename_p)))
+            return
+
         self.image_processor.calibrate()
 
 
@@ -624,7 +628,7 @@ class ImageWorker(Process):
             'gain'                : self.gain_v.value,
             'exposure'            : i_ref['exposure'],
             'stable_exposure'     : int(self.target_adu_found),
-            'target_adu'          : self.target_adu,
+            'target_adu'          : i_ref['target_adu'],
             'current_adu_target'  : self.current_adu_target,
             'current_adu'         : adu,
             'adu_average'         : adu_average,
@@ -862,11 +866,13 @@ class ImageWorker(Process):
             return
 
 
-        shutil.move(str(tmpfile_p), str(filename))
+        shutil.copy2(str(tmpfile_p), str(filename))
         filename.chmod(0o644)
 
         # set mtime to original exposure time
         #os.utime(str(filename), (i_ref['exp_date'].timestamp(), i_ref['exp_date'].timestamp()))
+
+        tmpfile_p.unlink()
 
 
         logger.info('Finished writing fit file')
@@ -1019,8 +1025,10 @@ class ImageWorker(Process):
             return
 
 
-        shutil.move(str(tmpfile_name), str(filename))
+        shutil.copy2(str(tmpfile_name), str(filename))
         filename.chmod(0o644)
+
+        tmpfile_name.unlink()
 
         # set mtime to original exposure time
         #os.utime(str(filename), (i_ref['exp_date'].timestamp(), i_ref['exp_date'].timestamp()))
@@ -1059,7 +1067,7 @@ class ImageWorker(Process):
             pass
 
 
-        shutil.move(str(tmpfile_name), str(latest_file))
+        shutil.copy2(str(tmpfile_name), str(latest_file))
         latest_file.chmod(0o644)
 
 
@@ -1088,21 +1096,10 @@ class ImageWorker(Process):
             return latest_file, None
 
 
-        try:
-            # Use a hardlink, there is a good chance these are on the same filesystem
-            os.link(str(latest_file), str(filename))
-        except PermissionError:
-            # possibly a FAT filesystem, copy instead
-            shutil.copy2(str(latest_file), str(filename))
-        except OSError as e:
-            # careful, some exceptions inhert from OSError like PermissionError
-            if e.errno == errno.EXDEV:
-                # different filesystems, copy file instead
-                shutil.copy2(str(latest_file), str(filename))
-            else:
-                raise
-
+        shutil.copy2(str(tmpfile_name), str(filename))
         filename.chmod(0o644)
+
+        tmpfile_name.unlink()
 
 
         # set mtime to original exposure time
@@ -1123,7 +1120,7 @@ class ImageWorker(Process):
             'gain'                : self.gain_v.value,
             'exposure'            : i_ref['exposure'],
             'stable_exposure'     : int(self.target_adu_found),
-            'target_adu'          : self.target_adu,
+            'target_adu'          : i_ref['target_adu'],
             'current_adu_target'  : self.current_adu_target,
             'current_adu'         : adu,
             'adu_average'         : adu_average,
@@ -1191,14 +1188,20 @@ class ImageWorker(Process):
         logger.info('Brightness average: %0.2f', adu)
 
 
+        if self.night_v.value:
+            target_adu = self.config['TARGET_ADU']
+        else:
+            target_adu = self.config['TARGET_ADU_DAY']
+
+
         # Brightness when the sun is in view (very short exposures) can change drastically when clouds pass through the view
         # Setting a deviation that is too short can cause exposure flapping
         if exposure < 0.001000:
             # DAY
             adu_dev = float(self.config.get('TARGET_ADU_DEV_DAY', 20))
 
-            target_adu_min = self.target_adu - adu_dev
-            target_adu_max = self.target_adu + adu_dev
+            target_adu_min = target_adu - adu_dev
+            target_adu_max = target_adu + adu_dev
             current_adu_target_min = self.current_adu_target - adu_dev
             current_adu_target_max = self.current_adu_target + adu_dev
 
@@ -1208,8 +1211,8 @@ class ImageWorker(Process):
             # NIGHT
             adu_dev = float(self.config.get('TARGET_ADU_DEV', 10))
 
-            target_adu_min = self.target_adu - adu_dev
-            target_adu_max = self.target_adu + adu_dev
+            target_adu_min = target_adu - adu_dev
+            target_adu_max = target_adu + adu_dev
             current_adu_target_min = self.current_adu_target - adu_dev
             current_adu_target_max = self.current_adu_target + adu_dev
 
@@ -1219,7 +1222,7 @@ class ImageWorker(Process):
 
 
         if not self.target_adu_found:
-            self.recalculate_exposure(exposure, adu, target_adu_min, target_adu_max, exp_scale_factor)
+            self.recalculate_exposure(exposure, adu, target_adu, target_adu_min, target_adu_max, exp_scale_factor)
             return adu, 0.0
 
 
@@ -1250,7 +1253,7 @@ class ImageWorker(Process):
         return adu, adu_average
 
 
-    def recalculate_exposure(self, exposure, adu, target_adu_min, target_adu_max, exp_scale_factor):
+    def recalculate_exposure(self, exposure, adu, target_adu, target_adu_min, target_adu_max, exp_scale_factor):
 
         # Until we reach a good starting point, do not calculate a moving average
         if adu <= target_adu_max and adu >= target_adu_min:
@@ -1263,9 +1266,9 @@ class ImageWorker(Process):
 
         # Scale the exposure up and down based on targets
         if adu > target_adu_max:
-            new_exposure = exposure - ((exposure - (exposure * (self.target_adu / adu))) * exp_scale_factor)
+            new_exposure = exposure - ((exposure - (exposure * (target_adu / adu))) * exp_scale_factor)
         elif adu < target_adu_min:
-            new_exposure = exposure - ((exposure - (exposure * (self.target_adu / adu))) * exp_scale_factor)
+            new_exposure = exposure - ((exposure - (exposure * (target_adu / adu))) * exp_scale_factor)
         else:
             new_exposure = exposure
 
@@ -1362,15 +1365,15 @@ class ImageProcessor(object):
     registration_exposure_thresh = 5.0
 
     __cfa_bgr_map = {
-        'GRBG' : cv2.COLOR_BAYER_GB2BGR,
         'RGGB' : cv2.COLOR_BAYER_BG2BGR,
+        'GRBG' : cv2.COLOR_BAYER_GB2BGR,
         'BGGR' : cv2.COLOR_BAYER_RG2BGR,
         'GBRG' : cv2.COLOR_BAYER_GR2BGR,  # untested
     }
 
     __cfa_gray_map = {
-        'GRBG' : cv2.COLOR_BAYER_GB2GRAY,
         'RGGB' : cv2.COLOR_BAYER_BG2GRAY,
+        'GRBG' : cv2.COLOR_BAYER_GB2GRAY,
         'BGGR' : cv2.COLOR_BAYER_RG2GRAY,
         'GBRG' : cv2.COLOR_BAYER_GR2GRAY,
     }
@@ -1498,7 +1501,11 @@ class ImageProcessor(object):
 
         ### Open file
         if filename_p.suffix in ['.fit']:
-            hdulist = fits.open(filename_p)
+            try:
+                hdulist = fits.open(filename_p)
+            except OSError as e:
+                filename_p.unlink()
+                raise BadImage(str(e)) from e
 
             #logger.info('Initial HDU Header = %s', pformat(hdulist[0].header))
             image_bitpix = hdulist[0].header['BITPIX']
@@ -1510,6 +1517,10 @@ class ImageProcessor(object):
 
             data = cv2.imread(str(filename_p), cv2.IMREAD_UNCHANGED)
 
+            if isinstance(data, type(None)):
+                filename_p.unlink()
+                raise BadImage('Bad jpeg image')
+
             image_bitpix = 8
             image_bayerpat = None
 
@@ -1520,6 +1531,10 @@ class ImageProcessor(object):
             indi_rgb = False
 
             data = cv2.imread(str(filename_p), cv2.IMREAD_UNCHANGED)
+
+            if isinstance(data, type(None)):
+                filename_p.unlink()
+                raise BadImage('Bad png image')
 
             image_bitpix = 8
             image_bayerpat = None
@@ -1533,7 +1548,12 @@ class ImageProcessor(object):
                 raise Exception('*** rawpy module not available ***')
 
             # DNG raw
-            raw = rawpy.imread(str(filename_p))
+            try:
+                raw = rawpy.imread(str(filename_p))
+            except rawpy._rawpy.LibRawIOError as e:
+                filename_p.unlink()
+                raise BadImage(str(e)) from e
+
             data = raw.raw_image
 
             # create a new fits container
@@ -1562,8 +1582,8 @@ class ImageProcessor(object):
                 hdulist[0].header['BAYERPAT'] = self.config['CFA_PATTERN']
                 hdulist[0].header['XBAYROFF'] = 0
                 hdulist[0].header['YBAYROFF'] = 0
-            elif self.config['CCD_INFO']['CCD_CFA']['CFA_TYPE'].get('text'):
-                hdulist[0].header['BAYERPAT'] = self.config['CCD_INFO']['CCD_CFA']['CFA_TYPE']['text']
+            elif camera.cfa:
+                hdulist[0].header['BAYERPAT'] = constants.CFA_MAP_STR[camera.cfa]
                 hdulist[0].header['XBAYROFF'] = 0
                 hdulist[0].header['YBAYROFF'] = 0
 
@@ -1625,6 +1645,12 @@ class ImageProcessor(object):
         detected_bit_depth = self._detectBitDepth(hdulist)
 
 
+        if self.night_v.value:
+            target_adu = self.config['TARGET_ADU']
+        else:
+            target_adu = self.config['TARGET_ADU_DAY']
+
+
         image_data = {
             'hdulist'          : hdulist,
             'calibrated'       : False,
@@ -1637,6 +1663,7 @@ class ImageProcessor(object):
             'image_bitpix'     : image_bitpix,
             'image_bayerpat'   : image_bayerpat,
             'detected_bit_depth' : detected_bit_depth,  # keeping this for reference
+            'target_adu'       : target_adu,
             'indi_rgb'         : indi_rgb,
             'sqm_value'        : None,    # populated later
             'lines'            : list(),  # populated later
@@ -1718,7 +1745,7 @@ class ImageProcessor(object):
             .order_by(
                 IndiAllSkyDbBadPixelMapTable.exposure.asc(),
                 IndiAllSkyDbBadPixelMapTable.temp.asc(),
-                IndiAllSkyDbBadPixelMapTable.createDate.asc(),
+                IndiAllSkyDbBadPixelMapTable.createDate.desc(),
             )\
             .first()
 
@@ -1735,7 +1762,7 @@ class ImageProcessor(object):
                 .order_by(
                     IndiAllSkyDbBadPixelMapTable.exposure.asc(),
                     IndiAllSkyDbBadPixelMapTable.temp.desc(),
-                    IndiAllSkyDbBadPixelMapTable.createDate.asc(),
+                    IndiAllSkyDbBadPixelMapTable.createDate.desc(),
                 )\
                 .first()
 
@@ -1765,7 +1792,7 @@ class ImageProcessor(object):
             .order_by(
                 IndiAllSkyDbDarkFrameTable.exposure.asc(),
                 IndiAllSkyDbDarkFrameTable.temp.asc(),
-                IndiAllSkyDbDarkFrameTable.createDate.asc(),
+                IndiAllSkyDbDarkFrameTable.createDate.desc(),
             )\
             .first()
 
@@ -1782,7 +1809,7 @@ class ImageProcessor(object):
                 .order_by(
                     IndiAllSkyDbDarkFrameTable.exposure.asc(),
                     IndiAllSkyDbDarkFrameTable.temp.desc(),
-                    IndiAllSkyDbDarkFrameTable.createDate.asc(),
+                    IndiAllSkyDbDarkFrameTable.createDate.desc(),
                 )\
                 .first()
 

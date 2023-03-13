@@ -72,7 +72,7 @@ logger = logging.getLogger('indi_allsky')
 
 class IndiAllSky(object):
 
-    periodic_reconfigure_offset = 300.0  # 5 minutes
+    periodic_tasks_offset = 180.0  # 3 minutes
 
 
     def __init__(self):
@@ -155,7 +155,8 @@ class IndiAllSky(object):
                 'error_q' : Queue(),
             })
 
-        self.periodic_reconfigure_time = time.time() + self.periodic_reconfigure_offset
+
+        self.periodic_tasks_time = time.time() + self.periodic_tasks_offset
 
 
         if self.config['IMAGE_FOLDER']:
@@ -252,6 +253,10 @@ class IndiAllSky(object):
             self.reparkTelescope()
 
 
+        # configuration needs to be performed before getting CCD_INFO
+        # which queries the exposure control
+        self.indiclient.configureCcdDevice(self.config['INDI_CONFIG_DEFAULTS'])
+
 
         # Get Properties
         #ccd_properties = self.indiclient.getCcdDeviceProperties()
@@ -259,6 +264,12 @@ class IndiAllSky(object):
 
         # get CCD information
         ccd_info = self.indiclient.getCcdInfo()
+
+
+        if self.config.get('CFA_PATTERN'):
+            cfa_pattern = self.config['CFA_PATTERN']
+        else:
+            cfa_pattern = ccd_info['CCD_CFA']['CFA_TYPE'].get('text')
 
 
         # need to get camera info before adding to DB
@@ -273,6 +284,7 @@ class IndiAllSky(object):
             'height'      : int(ccd_info.get('CCD_FRAME', {}).get('HEIGHT', {}).get('max')),
             'bits'        : int(ccd_info.get('CCD_INFO', {}).get('CCD_BITSPERPIXEL', {}).get('current')),
             'pixelSize'   : float(ccd_info.get('CCD_INFO', {}).get('CCD_PIXEL_SIZE', {}).get('current')),
+            'cfa'         : constants.CFA_STR_MAP[cfa_pattern],
 
             'location'    : self.config['LOCATION_NAME'],
             'latitude'    : self.latitude_v.value,
@@ -561,6 +573,10 @@ class IndiAllSky(object):
             self.indiclient.setTelescopeGps(self.indiclient.gps_device.getDeviceName())
 
 
+        # configuration needs to be performed before getting CCD_INFO
+        # which queries the exposure control
+        self.indiclient.configureCcdDevice(self.config['INDI_CONFIG_DEFAULTS'])
+
 
         # Get Properties
         #ccd_properties = self.indiclient.getCcdDeviceProperties()
@@ -568,6 +584,12 @@ class IndiAllSky(object):
 
         # get CCD information
         ccd_info = self.indiclient.getCcdInfo()
+
+
+        if self.config.get('CFA_PATTERN'):
+            cfa_pattern = self.config['CFA_PATTERN']
+        else:
+            cfa_pattern = ccd_info['CCD_CFA']['CFA_TYPE'].get('text')
 
 
         # need to get camera info before adding to DB
@@ -582,6 +604,7 @@ class IndiAllSky(object):
             'height'      : int(ccd_info.get('CCD_FRAME', {}).get('HEIGHT', {}).get('max')),
             'bits'        : int(ccd_info.get('CCD_INFO', {}).get('CCD_BITSPERPIXEL', {}).get('current')),
             'pixelSize'   : float(ccd_info.get('CCD_INFO', {}).get('CCD_PIXEL_SIZE', {}).get('current')),
+            'cfa'         : constants.CFA_STR_MAP[cfa_pattern],
 
             'location'    : self.config['LOCATION_NAME'],
             'latitude'    : self.latitude_v.value,
@@ -612,8 +635,6 @@ class IndiAllSky(object):
 
         # set BLOB mode to BLOB_ALSO
         self.indiclient.updateCcdBlobMode()
-
-        self.indiclient.configureCcdDevice(self.config['INDI_CONFIG_DEFAULTS'])
 
 
         try:
@@ -919,8 +940,14 @@ class IndiAllSky(object):
 
     def _pre_run_tasks(self):
         # Tasks that need to be run before the main program loop
+        now = time.time()
 
         self._systemHealthCheck()
+
+
+        # Update watchdog
+        self._miscDb.setState('WATCHDOG', int(now))
+
 
         if self.config.get('GPS_TIMESYNC'):
             self.validateGpsTime()
@@ -933,15 +960,21 @@ class IndiAllSky(object):
             self.shoot(7.0, sync=True, timeout=20.0)
 
 
-    def periodic_reconfigure(self):
+    def periodic_tasks(self):
         # Tasks that need to be run periodically
-        if self.periodic_reconfigure_time > time.time():
+        now = time.time()
+
+        if self.periodic_tasks_time > now:
             return
 
         # set next reconfigure time
-        self.periodic_reconfigure_time = time.time() + self.periodic_reconfigure_offset
+        self.periodic_tasks_time = now + self.periodic_tasks_offset
 
-        logger.warning('Periodic reconfigure triggered')
+        logger.warning('Periodic tasks triggered')
+
+
+        # Update watchdog
+        self._miscDb.setState('WATCHDOG', int(now))
 
 
         if self.config.get('GPS_TIMESYNC'):
@@ -1051,10 +1084,6 @@ class IndiAllSky(object):
 
                 # Queue externally defined tasks
                 self._queueManualTasks()
-
-
-                # Update watchdog
-                self._miscDb.setState('WATCHDOG', int(loop_start_time))
 
 
                 if not self.night and not self.config['DAYTIME_CAPTURE']:
@@ -1183,7 +1212,7 @@ class IndiAllSky(object):
                     self.reconfigureCcd()
 
                     # these tasks run every ~5 minutes
-                    self.periodic_reconfigure()
+                    self.periodic_tasks()
 
 
                     if now >= next_frame_time:

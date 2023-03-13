@@ -948,6 +948,26 @@ class IndiClient(PyIndi.BaseClient):
         return camera_ready, exposure_state
 
 
+    def abortCcdExposure(self):
+        logger.warning('Aborting exposure')
+
+        try:
+            ccd_abort = self.get_control(self._ccd_device, 'CCD_ABORT_EXPOSURE', 'switch', timeout=2.0)
+        except TimeOutException:
+            logger.warning("Abort not supported")
+            return
+
+
+        if ccd_abort.getPermission() == PyIndi.IP_RO:
+            logger.warning("Abort control is read only")
+            return
+
+
+        ccd_abort[0].setState(PyIndi.ISS_ON)   # ABORT
+
+        self.sendNewSwitch(ccd_abort)
+
+
     def getCcdGain(self):
         indi_exec = self._ccd_device.getDriverExec()
 
@@ -978,6 +998,7 @@ class IndiClient(PyIndi.BaseClient):
             'indi_qhy_ccd',
             'indi_simulator_ccd',
             'indi_rpicam',
+            'indi_pylibcamera.py', './indi_pylibcamera.py', '././indi_pylibcamera.py',
         ]:
             gain_ctl = self.get_control(self._ccd_device, 'CCD_GAIN', 'number')
             gain_index_dict = self.__map_indexes(gain_ctl, ['GAIN'])
@@ -1035,6 +1056,7 @@ class IndiClient(PyIndi.BaseClient):
             'indi_qhy_ccd',
             'indi_simulator_ccd',
             'indi_rpicam',
+            'indi_pylibcamera.py', './indi_pylibcamera.py', '././indi_pylibcamera.py',
         ]:
             gain_config = {
                 "PROPERTIES" : {
@@ -1107,6 +1129,7 @@ class IndiClient(PyIndi.BaseClient):
             'indi_rpicam',
             'indi_playerone_ccd',
             'indi_sx_ccd',
+            'indi_pylibcamera.py', './indi_pylibcamera.py', '././indi_pylibcamera.py',
         ]:
             binning_config = {
                 "PROPERTIES" : {

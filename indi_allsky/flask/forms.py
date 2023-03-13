@@ -58,6 +58,7 @@ def SQLALCHEMY_DATABASE_URI_validator(form, field):
 def CAMERA_INTERFACE_validator(form, field):
     if field.data not in (
         'indi',
+        'indi_passive',
         'libcamera_imx477',
         'libcamera_imx378',
         'libcamera_64mp_hawkeye',
@@ -345,6 +346,14 @@ def CCD_TEMP_SCRIPT_validator(form, field):
 
 
 def TARGET_ADU_validator(form, field):
+    if field.data <= 0:
+        raise ValidationError('Target ADU must be greater than 0')
+
+    if field.data > 255 :
+        raise ValidationError('Target ADU must be less than 255')
+
+
+def TARGET_ADU_DAY_validator(form, field):
     if field.data <= 0:
         raise ValidationError('Target ADU must be greater than 0')
 
@@ -1476,6 +1485,7 @@ def INDI_CONFIG_DEFAULTS_validator(form, field):
 class IndiAllskyConfigForm(FlaskForm):
     CAMERA_INTERFACE_choices = (
         ('indi', 'INDI'),
+        ('indi_passive', 'INDI (Passive)'),
         ('libcamera_imx477', 'libcamera IMX477'),
         ('libcamera_imx378', 'libcamera_IMX378'),
         ('libcamera_64mp_hawkeye', 'libcamera_64mp_Hawkeye'),
@@ -1633,7 +1643,8 @@ class IndiAllskyConfigForm(FlaskForm):
     TEMP_DISPLAY                     = SelectField('Temperature Display', choices=TEMP_DISPLAY_choices, validators=[DataRequired(), TEMP_DISPLAY_validator])
     CCD_TEMP_SCRIPT                  = StringField('External Temperature Script', validators=[CCD_TEMP_SCRIPT_validator])
     GPS_TIMESYNC                     = BooleanField('GPS Time Sync')
-    TARGET_ADU                       = IntegerField('Target ADU', validators=[DataRequired(), TARGET_ADU_validator])
+    TARGET_ADU                       = IntegerField('Target ADU (night)', validators=[DataRequired(), TARGET_ADU_validator])
+    TARGET_ADU_DAY                   = IntegerField('Target ADU (day)', validators=[DataRequired(), TARGET_ADU_DAY_validator])
     TARGET_ADU_DEV                   = IntegerField('Target ADU Deviation (night)', validators=[DataRequired(), TARGET_ADU_DEV_validator])
     TARGET_ADU_DEV_DAY               = IntegerField('Target ADU Deviation (day)', validators=[DataRequired(), TARGET_ADU_DEV_DAY_validator])
     ADU_ROI_X1                       = IntegerField('ADU ROI x1', validators=[ADU_ROI_validator])
