@@ -90,6 +90,7 @@ class IndiAllSkyConfigBase(object):
         "DETECT_METEORS" : False,
         "DETECT_MASK" : "",
         "DETECT_DRAW" : False,
+        "LOGO_OVERLAY" : "",
         "SQM_ROI" : [],
         "LOCATION_NAME"      : '',
         "LOCATION_LATITUDE"  : 33,
@@ -103,6 +104,7 @@ class IndiAllSkyConfigBase(object):
         "NIGHT_MOONMODE_ALT_DEG"   : 0,
         "NIGHT_MOONMODE_PHASE"     : 33,
         "WEB_EXTRA_TEXT" : "",
+        "WEB_NONLOCAL_IMAGES" : False,
         "KEOGRAM_ANGLE"    : 0,
         "KEOGRAM_H_SCALE"  : 100,
         "KEOGRAM_V_SCALE"  : 33,
@@ -129,6 +131,15 @@ class IndiAllSkyConfigBase(object):
         "IMAGE_SCALE"      : 100,
         "NIGHT_GRAYSCALE"  : False,
         "DAYTIME_GRAYSCALE": False,
+        "IMAGE_CIRCLE_MASK" : {
+            "ENABLE"   : False,
+            "DIAMETER" : 1000,
+            "OFFSET_X" : 0,
+            "OFFSET_Y" : 0,
+            "BLUR"     : 35,
+            "OPACITY"  : 100,
+            "OUTLINE"  : False,
+        },
         "IMAGE_SAVE_FITS"     : False,
         "IMAGE_EXPORT_RAW"    : "",  # png or tif (or empty)
         "IMAGE_EXPORT_FOLDER" : "/var/www/html/allsky/images/export",
@@ -236,11 +247,12 @@ class IndiAllSkyConfigBase(object):
             "APIKEY"                 : "",
             "APIKEY_E"               : "",
             "CERT_BYPASS"            : False,
+            "POST_S3"                : False,
         },
         "LIBCAMERA" : {
             "IMAGE_FILE_TYPE"        : "dng",
             "EXTRA_OPTIONS"          : "",
-        }
+        },
     })
 
 

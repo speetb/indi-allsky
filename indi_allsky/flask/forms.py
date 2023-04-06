@@ -11,6 +11,8 @@ import cv2
 import numpy
 import pycurl
 
+from passlib.hash import argon2
+
 from flask_wtf import FlaskForm
 from wtforms import IntegerField
 from wtforms import FloatField
@@ -30,9 +32,12 @@ from sqlalchemy import extract
 from sqlalchemy import func
 #from sqlalchemy.types import DateTime
 #from sqlalchemy.types import Date
+from sqlalchemy import and_
+from sqlalchemy import or_
 from sqlalchemy.orm.exc import NoResultFound
 from sqlalchemy.sql.expression import true as sa_true
 from sqlalchemy.sql.expression import false as sa_false
+from sqlalchemy.sql.expression import null as sa_null
 
 from flask import current_app as app
 
@@ -61,8 +66,9 @@ def CAMERA_INTERFACE_validator(form, field):
         'indi_passive',
         'libcamera_imx477',
         'libcamera_imx378',
+        'libcamera_imx519',
         'libcamera_64mp_hawkeye',
-        'libcamera_imx407',
+        'libcamera_imx708',
         'libcamera_imx290',
         'libcamera_imx462',
     ):
@@ -753,12 +759,94 @@ def DETECT_MASK_validator(form, field):
         raise ValidationError('Mask image is all black')
 
 
+def LOGO_OVERLAY_validator(form, field):
+    if not field.data:
+        return
+
+    folder_regex = r'^[a-zA-Z0-9_\.\-\/\ ]+$'
+    if not re.search(folder_regex, field.data):
+        raise ValidationError('Invalid file name')
+
+    ext_regex = r'\.png$'
+    if not re.search(ext_regex, field.data, re.IGNORECASE):
+        raise ValidationError('Mask file must be a PNG')
+
+    detect_mask_p = Path(field.data)
+
+    try:
+        if not detect_mask_p.exists():
+            raise ValidationError('File does not exist')
+
+        if not detect_mask_p.is_file():
+            raise ValidationError('Not a file')
+
+        with io.open(str(detect_mask_p), 'r'):
+            pass
+    except PermissionError as e:
+        raise ValidationError(str(e))
+
+
+    mask_data = cv2.imread(str(detect_mask_p), cv2.IMREAD_UNCHANGED)
+    if isinstance(mask_data, type(None)):
+        raise ValidationError('File is not a valid image')
+
+    try:
+        if mask_data.shape[2] != 4:
+            raise ValidationError('Mask does not contain an alpha channel')
+    except IndexError:
+        raise ValidationError('Mask does not contain an alpha channel')
+
+
 def IMAGE_SCALE_validator(form, field):
     if field.data < 1:
         raise ValidationError('Image Scaling must be 1 or greater')
 
     if field.data > 100:
         raise ValidationError('Image Scaling must be 100 or less')
+
+
+def IMAGE_CIRCLE_MASK__DIAMETER_validator(form, field):
+    if not isinstance(field.data, int):
+        raise ValidationError('Please enter valid number')
+
+    if field.data < 100:
+        raise ValidationError('Diameter must be 100 or greater')
+
+
+def IMAGE_CIRCLE_MASK__OFFSET_X_validator(form, field):
+    if not isinstance(field.data, int):
+        raise ValidationError('Please enter valid number')
+
+
+def IMAGE_CIRCLE_MASK__OFFSET_Y_validator(form, field):
+    if not isinstance(field.data, int):
+        raise ValidationError('Please enter valid number')
+
+
+def IMAGE_CIRCLE_MASK__BLUR_validator(form, field):
+    if not isinstance(field.data, int):
+        raise ValidationError('Please enter valid number')
+
+    if field.data < 0:
+        raise ValidationError('Blur must be 0 or more')
+
+    if field.data == 0:
+        # 0 is disabled, but technically an even number
+        pass
+    elif field.data % 2 == 0:
+        raise ValidationError('Blur must be an odd number')
+
+
+def IMAGE_CIRCLE_MASK__OPACITY_validator(form, field):
+    if not isinstance(field.data, int):
+        raise ValidationError('Please enter valid number')
+
+    if field.data < 0:
+        raise ValidationError('Opacity must be 0 or more')
+
+
+    if field.data > 100:
+        raise ValidationError('Blur must be 100 or less')
 
 
 def IMAGE_CROP_ROI_validator(form, field):
@@ -1481,15 +1569,15 @@ def INDI_CONFIG_DEFAULTS_validator(form, field):
         #    raise ValidationError('Switch {0:s} requires at least one "on" key'.format(k))
 
 
-
 class IndiAllskyConfigForm(FlaskForm):
     CAMERA_INTERFACE_choices = (
         ('indi', 'INDI'),
         ('indi_passive', 'INDI (Passive)'),
         ('libcamera_imx477', 'libcamera IMX477'),
         ('libcamera_imx378', 'libcamera_IMX378'),
+        ('libcamera_imx519', 'libcamera_IMX519'),
         ('libcamera_64mp_hawkeye', 'libcamera_64mp_Hawkeye'),
-        ('libcamera_imx407', 'libcamera_IMX407'),
+        ('libcamera_imx708', 'libcamera_IMX708'),
         ('libcamera_imx290', 'libcamera_IMX290'),
         ('libcamera_imx462', 'libcamera_IMX462'),
     )
@@ -1593,8 +1681,8 @@ class IndiAllskyConfigForm(FlaskForm):
     )
 
     S3UPLOAD__CLASSNAME_choices = (
-        ('boto3_s3', 'Boto3'),
-        ('libcloud_s3', 'Apache Libcloud'),
+        ('boto3_s3', 'Boto3 (AWS)'),
+        ('libcloud_s3', 'Apache Libcloud (AWS)'),
     )
 
     MQTTPUBLISH__TRANSPORT_choices = (
@@ -1656,6 +1744,7 @@ class IndiAllskyConfigForm(FlaskForm):
     DETECT_METEORS                   = BooleanField('Meteor Detection')
     DETECT_MASK                      = StringField('Detection Mask', validators=[DETECT_MASK_validator])
     DETECT_DRAW                      = BooleanField('Mark Detections on Image')
+    LOGO_OVERLAY                     = StringField('Logo Overlay', validators=[LOGO_OVERLAY_validator])
     SQM_ROI_X1                       = IntegerField('SQM ROI x1', validators=[SQM_ROI_validator])
     SQM_ROI_Y1                       = IntegerField('SQM ROI y1', validators=[SQM_ROI_validator])
     SQM_ROI_X2                       = IntegerField('SQM ROI x2', validators=[SQM_ROI_validator])
@@ -1672,6 +1761,7 @@ class IndiAllskyConfigForm(FlaskForm):
     NIGHT_MOONMODE_ALT_DEG           = FloatField('Moonmode Moon Altitude', validators=[NIGHT_MOONMODE_ALT_DEG_validator])
     NIGHT_MOONMODE_PHASE             = FloatField('Moonmode Moon Phase', validators=[NIGHT_MOONMODE_PHASE_validator])
     WEB_EXTRA_TEXT                   = StringField('Extra HTML Info File', validators=[WEB_EXTRA_TEXT_validator])
+    WEB_NONLOCAL_IMAGES              = BooleanField('Non-Local Images')
     KEOGRAM_ANGLE                    = FloatField('Keogram Rotation Angle', validators=[KEOGRAM_ANGLE_validator])
     KEOGRAM_H_SCALE                  = IntegerField('Keogram Horizontal Scaling', validators=[DataRequired(), KEOGRAM_H_SCALE_validator])
     KEOGRAM_V_SCALE                  = IntegerField('Keogram Vertical Scaling', validators=[DataRequired(), KEOGRAM_V_SCALE_validator])
@@ -1693,6 +1783,13 @@ class IndiAllskyConfigForm(FlaskForm):
     IMAGE_FLIP_V                     = BooleanField('Flip Image Vertically')
     IMAGE_FLIP_H                     = BooleanField('Flip Image Horizontally')
     IMAGE_SCALE                      = IntegerField('Image Scaling', validators=[DataRequired(), IMAGE_SCALE_validator])
+    IMAGE_CIRCLE_MASK__ENABLE        = BooleanField('Enable Image Circle Mask')
+    IMAGE_CIRCLE_MASK__DIAMETER      = IntegerField('Mask Diameter', validators=[DataRequired(), IMAGE_CIRCLE_MASK__DIAMETER_validator])
+    IMAGE_CIRCLE_MASK__OFFSET_X      = IntegerField('Mask X Offset', validators=[IMAGE_CIRCLE_MASK__OFFSET_X_validator])
+    IMAGE_CIRCLE_MASK__OFFSET_Y      = IntegerField('Mask Y Offset', validators=[IMAGE_CIRCLE_MASK__OFFSET_Y_validator])
+    IMAGE_CIRCLE_MASK__BLUR          = IntegerField('Mask Blur', validators=[IMAGE_CIRCLE_MASK__BLUR_validator])
+    IMAGE_CIRCLE_MASK__OPACITY       = IntegerField('Mask Opacity %', validators=[IMAGE_CIRCLE_MASK__OPACITY_validator])
+    IMAGE_CIRCLE_MASK__OUTLINE       = BooleanField('Mask Outline')
     IMAGE_CROP_ROI_X1                = IntegerField('Image Crop ROI x1', validators=[IMAGE_CROP_ROI_validator])
     IMAGE_CROP_ROI_Y1                = IntegerField('Image Crop ROI y1', validators=[IMAGE_CROP_ROI_validator])
     IMAGE_CROP_ROI_X2                = IntegerField('Image Crop ROI x2', validators=[IMAGE_CROP_ROI_validator])
@@ -1784,6 +1881,7 @@ class IndiAllskyConfigForm(FlaskForm):
     SYNCAPI__USERNAME                = StringField('Username', validators=[SYNCAPI__USERNAME_validator])
     SYNCAPI__APIKEY                  = PasswordField('API Key', widget=PasswordInput(hide_value=False), validators=[SYNCAPI__APIKEY_validator])
     SYNCAPI__CERT_BYPASS             = BooleanField('Disable Certificate Validation')
+    SYNCAPI__POST_S3                 = BooleanField('Sync after S3 Upload')
     FITSHEADERS__0__KEY              = StringField('FITS Header 1', validators=[DataRequired(), FITSHEADER_KEY_validator])
     FITSHEADERS__0__VAL              = StringField('FITS Header 1 Value', validators=[])
     FITSHEADERS__1__KEY              = StringField('FITS Header 2', validators=[DataRequired(), FITSHEADER_KEY_validator])
@@ -1797,8 +1895,11 @@ class IndiAllskyConfigForm(FlaskForm):
     LIBCAMERA__IMAGE_FILE_TYPE       = SelectField('libcamera image type', choices=LIBCAMERA__IMAGE_FILE_TYPE_choices, validators=[DataRequired(), LIBCAMERA__IMAGE_FILE_TYPE_validator])
     LIBCAMERA__EXTRA_OPTIONS         = StringField('libcamera extra options', validators=[LIBCAMERA__EXTRA_OPTIONS_validator])
     INDI_CONFIG_DEFAULTS             = TextAreaField('INDI Camera Configuration', validators=[DataRequired(), INDI_CONFIG_DEFAULTS_validator])
+
     RELOAD_ON_SAVE                   = BooleanField('Reload on Save')
     CONFIG_NOTE                      = StringField('Config Note')
+
+    ADMIN_NETWORKS_FLASK             = TextAreaField('Admin Networks', render_kw={'readonly' : True, 'disabled' : 'disabled'})
 
 
     #def __init__(self, *args, **kwargs):
@@ -1822,6 +1923,7 @@ class IndiAllskyImageViewer(FlaskForm):
         self.detections_count = kwargs.get('detections_count', 0)
         self.s3_prefix = kwargs.get('s3_prefix', '')
         self.camera_id = kwargs.get('camera_id')
+        self.non_local = kwargs.get('non_local')
 
 
     def getYears(self):
@@ -1831,10 +1933,29 @@ class IndiAllskyImageViewer(FlaskForm):
             createDate_year,
         )\
             .join(IndiAllSkyDbImageTable.camera)\
-            .filter(IndiAllSkyDbCameraTable.id == self.camera_id)\
-            .filter(IndiAllSkyDbImageTable.detections >= self.detections_count)\
+            .filter(
+                and_(
+                    IndiAllSkyDbCameraTable.id == self.camera_id,
+                    IndiAllSkyDbImageTable.detections >= self.detections_count,
+                )
+        )
+
+
+        if self.non_local:
+            # Do not serve local assets
+            years_query = years_query\
+                .filter(
+                    or_(
+                        IndiAllSkyDbImageTable.remote_url != sa_null(),
+                        IndiAllSkyDbImageTable.s3_key != sa_null(),
+                    )
+                )
+
+
+        years_query = years_query\
             .distinct()\
             .order_by(createDate_year.desc())
+
 
         year_choices = []
         for y in years_query:
@@ -1854,11 +1975,30 @@ class IndiAllskyImageViewer(FlaskForm):
             createDate_month,
         )\
             .join(IndiAllSkyDbImageTable.camera)\
-            .filter(IndiAllSkyDbCameraTable.id == self.camera_id)\
-            .filter(IndiAllSkyDbImageTable.detections >= self.detections_count)\
-            .filter(createDate_year == year)\
+            .filter(
+                and_(
+                    IndiAllSkyDbCameraTable.id == self.camera_id,
+                    IndiAllSkyDbImageTable.detections >= self.detections_count,
+                    createDate_year == year,
+                )
+        )\
+
+
+        if self.non_local:
+            # Do not serve local assets
+            months_query = months_query\
+                .filter(
+                    or_(
+                        IndiAllSkyDbImageTable.remote_url != sa_null(),
+                        IndiAllSkyDbImageTable.s3_key != sa_null(),
+                    )
+                )
+
+
+        months_query = months_query\
             .distinct()\
             .order_by(createDate_month.desc())
+
 
         month_choices = []
         for m in months_query:
@@ -1882,12 +2022,31 @@ class IndiAllskyImageViewer(FlaskForm):
             createDate_day,
         )\
             .join(IndiAllSkyDbImageTable.camera)\
-            .filter(IndiAllSkyDbCameraTable.id == self.camera_id)\
-            .filter(IndiAllSkyDbImageTable.detections >= self.detections_count)\
-            .filter(createDate_year == year)\
-            .filter(createDate_month == month)\
+            .filter(
+                and_(
+                    IndiAllSkyDbCameraTable.id == self.camera_id,
+                    IndiAllSkyDbImageTable.detections >= self.detections_count,
+                    createDate_year == year,
+                    createDate_month == month,
+                )
+        )
+
+
+        if self.non_local:
+            # Do not serve local assets
+            days_query = days_query\
+                .filter(
+                    or_(
+                        IndiAllSkyDbImageTable.remote_url != sa_null(),
+                        IndiAllSkyDbImageTable.s3_key != sa_null(),
+                    )
+                )
+
+
+        days_query = days_query\
             .distinct()\
             .order_by(createDate_day.desc())
+
 
         day_choices = []
         for d in days_query:
@@ -1911,13 +2070,32 @@ class IndiAllskyImageViewer(FlaskForm):
             createDate_hour,
         )\
             .join(IndiAllSkyDbImageTable.camera)\
-            .filter(IndiAllSkyDbCameraTable.id == self.camera_id)\
-            .filter(IndiAllSkyDbImageTable.detections >= self.detections_count)\
-            .filter(createDate_year == year)\
-            .filter(createDate_month == month)\
-            .filter(createDate_day == day)\
+            .filter(
+                and_(
+                    IndiAllSkyDbCameraTable.id == self.camera_id,
+                    IndiAllSkyDbImageTable.detections >= self.detections_count,
+                    createDate_year == year,
+                    createDate_month == month,
+                    createDate_day == day,
+                )
+        )
+
+
+        if self.non_local:
+            # Do not serve local assets
+            hours_query = hours_query\
+                .filter(
+                    or_(
+                        IndiAllSkyDbImageTable.remote_url != sa_null(),
+                        IndiAllSkyDbImageTable.s3_key != sa_null(),
+                    )
+                )
+
+
+        hours_query = hours_query\
             .distinct()\
             .order_by(createDate_hour.desc())
+
 
         hour_choices = []
         for h in hours_query:
@@ -1936,13 +2114,32 @@ class IndiAllskyImageViewer(FlaskForm):
 
         images_query = IndiAllSkyDbImageTable.query\
             .join(IndiAllSkyDbImageTable.camera)\
-            .filter(IndiAllSkyDbCameraTable.id == self.camera_id)\
-            .filter(IndiAllSkyDbImageTable.detections >= self.detections_count)\
-            .filter(createDate_year == year)\
-            .filter(createDate_month == month)\
-            .filter(createDate_day == day)\
-            .filter(createDate_hour == hour)\
+            .filter(
+                and_(
+                    IndiAllSkyDbCameraTable.id == self.camera_id,
+                    IndiAllSkyDbImageTable.detections >= self.detections_count,
+                    createDate_year == year,
+                    createDate_month == month,
+                    createDate_day == day,
+                    createDate_hour == hour,
+                )
+            )
+
+
+        if self.non_local:
+            # Do not serve local assets
+            images_query = images_query\
+                .filter(
+                    or_(
+                        IndiAllSkyDbImageTable.remote_url != sa_null(),
+                        IndiAllSkyDbImageTable.s3_key != sa_null(),
+                    )
+                )
+
+
+        images_query = images_query\
             .order_by(IndiAllSkyDbImageTable.createDate.desc())
+
 
         images_choices = list()
         fits_choices = list()
@@ -2001,8 +2198,12 @@ class IndiAllskyImageViewerPreload(IndiAllskyImageViewer):
 
         last_image = IndiAllSkyDbImageTable.query\
             .join(IndiAllSkyDbImageTable.camera)\
-            .filter(IndiAllSkyDbCameraTable.id == self.camera_id)\
-            .filter(IndiAllSkyDbImageTable.detections >= self.detections_count)\
+            .filter(
+                and_(
+                    IndiAllSkyDbCameraTable.id == self.camera_id,
+                    IndiAllSkyDbImageTable.detections >= self.detections_count,
+                )
+            )\
             .order_by(IndiAllSkyDbImageTable.createDate.desc())\
             .first()
 
@@ -2060,6 +2261,7 @@ class IndiAllskyVideoViewer(FlaskForm):
 
         self.s3_prefix = kwargs.get('s3_prefix', '')
         self.camera_id = kwargs.get('camera_id')
+        self.non_local = kwargs.get('non_local')
 
 
     def getYears(self):
@@ -2069,9 +2271,24 @@ class IndiAllskyVideoViewer(FlaskForm):
             dayDate_year,
         )\
             .join(IndiAllSkyDbVideoTable.camera)\
-            .filter(IndiAllSkyDbCameraTable.id == self.camera_id)\
+            .filter(IndiAllSkyDbCameraTable.id == self.camera_id)
+
+
+        if self.non_local:
+            # Do not serve local assets
+            years_query = years_query\
+                .filter(
+                    or_(
+                        IndiAllSkyDbVideoTable.remote_url != sa_null(),
+                        IndiAllSkyDbVideoTable.s3_key != sa_null(),
+                    )
+                )
+
+
+        years_query = years_query\
             .distinct()\
             .order_by(dayDate_year.desc())
+
 
         year_choices = []
         for y in years_query:
@@ -2091,10 +2308,29 @@ class IndiAllskyVideoViewer(FlaskForm):
             dayDate_month,
         )\
             .join(IndiAllSkyDbVideoTable.camera)\
-            .filter(IndiAllSkyDbCameraTable.id == self.camera_id)\
-            .filter(dayDate_year == year)\
+            .filter(
+                and_(
+                    IndiAllSkyDbCameraTable.id == self.camera_id,
+                    dayDate_year == year,
+                )
+        )
+
+
+        if self.non_local:
+            # Do not serve local assets
+            months_query = months_query\
+                .filter(
+                    or_(
+                        IndiAllSkyDbVideoTable.remote_url != sa_null(),
+                        IndiAllSkyDbVideoTable.s3_key != sa_null(),
+                    )
+                )
+
+
+        months_query = months_query\
             .distinct()\
             .order_by(dayDate_month.desc())
+
 
         month_choices = []
         for m in months_query:
@@ -2114,9 +2350,13 @@ class IndiAllskyVideoViewer(FlaskForm):
 
         videos_query = IndiAllSkyDbVideoTable.query\
             .join(IndiAllSkyDbVideoTable.camera)\
-            .filter(IndiAllSkyDbCameraTable.id == self.camera_id)\
-            .filter(dayDate_year == year)\
-            .filter(dayDate_month == month)
+            .filter(
+                and_(
+                    IndiAllSkyDbCameraTable.id == self.camera_id,
+                    dayDate_year == year,
+                    dayDate_month == month,
+                )
+            )
 
 
         # add time of day filter
@@ -2126,6 +2366,17 @@ class IndiAllskyVideoViewer(FlaskForm):
             videos_query = videos_query.filter(IndiAllSkyDbVideoTable.night == sa_true())
         else:
             pass
+
+
+        if self.non_local:
+            # Do not serve local assets
+            videos_query = videos_query\
+                .filter(
+                    or_(
+                        IndiAllSkyDbVideoTable.remote_url != sa_null(),
+                        IndiAllSkyDbVideoTable.s3_key != sa_null(),
+                    )
+                )
 
 
         # set order
@@ -2158,11 +2409,29 @@ class IndiAllskyVideoViewer(FlaskForm):
             # fix is inbound
 
             ### Keogram
-            keogram_entry = IndiAllSkyDbKeogramTable.query\
+            keogram_entry_q = IndiAllSkyDbKeogramTable.query\
                 .join(IndiAllSkyDbKeogramTable.camera)\
-                .filter(IndiAllSkyDbCameraTable.id == self.camera_id)\
-                .filter(IndiAllSkyDbKeogramTable.dayDate == dayDate)\
-                .filter(IndiAllSkyDbKeogramTable.night == entry['night'])\
+                .filter(
+                    and_(
+                        IndiAllSkyDbCameraTable.id == self.camera_id,
+                        IndiAllSkyDbKeogramTable.dayDate == dayDate,
+                        IndiAllSkyDbKeogramTable.night == entry['night'],
+                    )
+                )
+
+
+            if self.non_local:
+                # Do not serve local assets
+                keogram_entry_q = keogram_entry_q\
+                    .filter(
+                        or_(
+                            IndiAllSkyDbKeogramTable.remote_url != sa_null(),
+                            IndiAllSkyDbKeogramTable.s3_key != sa_null(),
+                        )
+                    )
+
+
+            keogram_entry = keogram_entry_q\
                 .order_by(IndiAllSkyDbKeogramTable.dayDate.asc())\
                 .first()  # use the oldest (asc)
 
@@ -2178,11 +2447,29 @@ class IndiAllskyVideoViewer(FlaskForm):
 
 
             ### Star trail
-            startrail_entry = IndiAllSkyDbStarTrailsTable.query\
+            startrail_entry_q = IndiAllSkyDbStarTrailsTable.query\
                 .join(IndiAllSkyDbStarTrailsTable.camera)\
-                .filter(IndiAllSkyDbCameraTable.id == self.camera_id)\
-                .filter(IndiAllSkyDbStarTrailsTable.dayDate == dayDate)\
-                .filter(IndiAllSkyDbStarTrailsTable.night == entry['night'])\
+                .filter(
+                    and_(
+                        IndiAllSkyDbCameraTable.id == self.camera_id,
+                        IndiAllSkyDbStarTrailsTable.dayDate == dayDate,
+                        IndiAllSkyDbStarTrailsTable.night == entry['night'],
+                    )
+                )
+
+
+            if self.non_local:
+                # Do not serve local assets
+                startrail_entry_q = startrail_entry_q\
+                    .filter(
+                        or_(
+                            IndiAllSkyDbStarTrailsTable.remote_url != sa_null(),
+                            IndiAllSkyDbStarTrailsTable.s3_key != sa_null(),
+                        )
+                    )
+
+
+            startrail_entry = startrail_entry_q\
                 .order_by(IndiAllSkyDbStarTrailsTable.dayDate.asc())\
                 .first()  # use the oldest (asc)
 
@@ -2198,11 +2485,29 @@ class IndiAllskyVideoViewer(FlaskForm):
 
 
             ### Star trail timelapses
-            startrail_video_entry = IndiAllSkyDbStarTrailsVideoTable.query\
+            startrail_video_entry_q = IndiAllSkyDbStarTrailsVideoTable.query\
                 .join(IndiAllSkyDbStarTrailsVideoTable.camera)\
-                .filter(IndiAllSkyDbCameraTable.id == self.camera_id)\
-                .filter(IndiAllSkyDbStarTrailsVideoTable.dayDate == dayDate)\
-                .filter(IndiAllSkyDbStarTrailsVideoTable.night == entry['night'])\
+                .filter(
+                    and_(
+                        IndiAllSkyDbCameraTable.id == self.camera_id,
+                        IndiAllSkyDbStarTrailsVideoTable.dayDate == dayDate,
+                        IndiAllSkyDbStarTrailsVideoTable.night == entry['night'],
+                    )
+                )
+
+
+            if self.non_local:
+                # Do not serve local assets
+                startrail_video_entry_q = startrail_video_entry_q\
+                    .filter(
+                        or_(
+                            IndiAllSkyDbStarTrailsVideoTable.remote_url != sa_null(),
+                            IndiAllSkyDbStarTrailsVideoTable.s3_key != sa_null(),
+                        )
+                    )
+
+
+            startrail_video_entry = startrail_video_entry_q\
                 .order_by(IndiAllSkyDbStarTrailsVideoTable.dayDate.asc())\
                 .first()  # use the oldest (asc)
 
@@ -2343,8 +2648,12 @@ class IndiAllskyTimelapseGeneratorForm(FlaskForm):
             day_day_str = '{0:s} Day'.format(day_str)
 
             video_entry_night = IndiAllSkyDbVideoTable.query\
-                .filter(IndiAllSkyDbVideoTable.dayDate == day_date)\
-                .filter(IndiAllSkyDbVideoTable.night == true)\
+                .filter(
+                    and_(
+                        IndiAllSkyDbVideoTable.dayDate == day_date,
+                        IndiAllSkyDbVideoTable.night == true,
+                    )
+                )\
                 .first()
 
             if video_entry_night:
@@ -2357,8 +2666,12 @@ class IndiAllskyTimelapseGeneratorForm(FlaskForm):
 
 
             video_entry_day = IndiAllSkyDbVideoTable.query\
-                .filter(IndiAllSkyDbVideoTable.dayDate == day_date)\
-                .filter(IndiAllSkyDbVideoTable.night == false)\
+                .filter(
+                    and_(
+                        IndiAllSkyDbVideoTable.dayDate == day_date,
+                        IndiAllSkyDbVideoTable.night == false,
+                    )
+                )\
                 .first()
 
             if video_entry_day:
@@ -2371,8 +2684,12 @@ class IndiAllskyTimelapseGeneratorForm(FlaskForm):
 
 
             keogram_entry_night = IndiAllSkyDbKeogramTable.query\
-                .filter(IndiAllSkyDbKeogramTable.dayDate == day_date)\
-                .filter(IndiAllSkyDbKeogramTable.night == true)\
+                .filter(
+                    and_(
+                        IndiAllSkyDbKeogramTable.dayDate == day_date,
+                        IndiAllSkyDbKeogramTable.night == true,
+                    )
+                )\
                 .first()
 
             if keogram_entry_night:
@@ -2385,8 +2702,12 @@ class IndiAllskyTimelapseGeneratorForm(FlaskForm):
 
 
             keogram_entry_day = IndiAllSkyDbKeogramTable.query\
-                .filter(IndiAllSkyDbKeogramTable.dayDate == day_date)\
-                .filter(IndiAllSkyDbKeogramTable.night == false)\
+                .filter(
+                    and_(
+                        IndiAllSkyDbKeogramTable.dayDate == day_date,
+                        IndiAllSkyDbKeogramTable.night == false,
+                    )
+                )\
                 .first()
 
             if keogram_entry_day:
@@ -2399,8 +2720,12 @@ class IndiAllskyTimelapseGeneratorForm(FlaskForm):
 
 
             startrail_entry_night = IndiAllSkyDbStarTrailsTable.query\
-                .filter(IndiAllSkyDbStarTrailsTable.dayDate == day_date)\
-                .filter(IndiAllSkyDbStarTrailsTable.night == true)\
+                .filter(
+                    and_(
+                        IndiAllSkyDbStarTrailsTable.dayDate == day_date,
+                        IndiAllSkyDbStarTrailsTable.night == true,
+                    )
+                )\
                 .first()
 
             if startrail_entry_night:
@@ -2413,8 +2738,12 @@ class IndiAllskyTimelapseGeneratorForm(FlaskForm):
 
 
             startrail_video_entry_night = IndiAllSkyDbStarTrailsVideoTable.query\
-                .filter(IndiAllSkyDbStarTrailsVideoTable.dayDate == day_date)\
-                .filter(IndiAllSkyDbStarTrailsVideoTable.night == true)\
+                .filter(
+                    and_(
+                        IndiAllSkyDbStarTrailsVideoTable.dayDate == day_date,
+                        IndiAllSkyDbStarTrailsVideoTable.night == true,
+                    )
+                )\
                 .first()
 
             if startrail_video_entry_night:
@@ -2550,4 +2879,56 @@ class IndiAllskyCameraSelectForm(FlaskForm):
             camera_list.append((camera.id, camera.name))
 
         return camera_list
+
+
+
+
+def USER__NAME_validator(form, field):
+    pass
+
+
+def USER__EMAIL_validator(form, field):
+    email_regex = r'[^@]+@[^@]+\.[^@]+'
+
+    if not re.search(email_regex, field.data):
+        raise ValidationError('Email address is not valid')
+
+
+def USER__NEW_PASSWORD_validator(form, field):
+    if not field.data:
+        return
+
+    if len(field.data) < 8:
+        raise ValidationError('Password must be 8 characters or more')
+
+
+class IndiAllskyUserInfoForm(FlaskForm):
+    USERNAME          = StringField('Username', render_kw={'readonly' : True, 'disabled' : 'disabled'})
+    NAME              = StringField('Name', validators=[DataRequired(), USER__NAME_validator])
+    EMAIL             = StringField('Email', render_kw={'readonly' : True, 'disabled' : 'disabled'})
+    ADMIN             = BooleanField('Admin', render_kw={'disabled' : 'disabled'})
+    CURRENT_PASSWORD  = PasswordField('Current Password', widget=PasswordInput(), validators=[])
+    NEW_PASSWORD      = PasswordField('New Password', widget=PasswordInput(), validators=[USER__NEW_PASSWORD_validator])
+    NEW_PASSWORD2     = PasswordField('', widget=PasswordInput(), validators=[])
+
+
+    def validate(self, user):
+        result = super(IndiAllskyUserInfoForm, self).validate()
+
+        if self.CURRENT_PASSWORD.data:
+            if not argon2.verify(self.CURRENT_PASSWORD.data, user.password):
+                self.CURRENT_PASSWORD.errors.append('Current password is not valid')
+                result = False
+
+
+        if self.NEW_PASSWORD.data != self.NEW_PASSWORD2.data:
+            self.NEW_PASSWORD2.errors.append('Passwords do not match')
+            result = False
+
+
+        if argon2.verify(self.NEW_PASSWORD.data, user.password):
+            self.NEW_PASSWORD.errors.append('Password cannot be the same as the old password')
+            result = False
+
+        return result
 

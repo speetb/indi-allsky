@@ -27,6 +27,6 @@ bcrypt
 passlib[argon2]
 flask-login
 is-safe-url
+prettytable
 mysql-connector-python
 PyMySQL
-prettytable

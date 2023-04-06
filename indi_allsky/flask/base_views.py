@@ -1,11 +1,13 @@
 import io
 import math
 import time
+import ipaddress
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 import ephem
 
+from flask import request
 from flask import session
 from flask import render_template
 from flask import jsonify
@@ -86,9 +88,50 @@ class BaseView(View):
 
         camera = IndiAllSkyDbCameraTable.query\
             .filter(IndiAllSkyDbCameraTable.id == camera_id)\
-            .one()
+            .first()
+
+        if not camera:
+            # this can happen when cameras are deleted
+            session['camera_id'] = -1
+            return FakeCamera()
 
         return camera
+
+
+    def verify_admin_network(self):
+        for n in app.config.get('ADMIN_NETWORKS', []):
+            try:
+                admin_network = ipaddress.ip_network(n, strict=False)
+            except ValueError:
+                app.logger.error('Invalid network: %s', n)
+                continue
+
+
+            if request.headers.get('X-Forwarded-For'):
+                remote_addrs = request.headers.get('X-Forwarded-For')
+            else:
+                remote_addrs = request.remote_addr
+
+
+            remote_addrs_list = remote_addrs.split(',')
+
+            # we only want to validate the last IP in the list
+            client_addr = remote_addrs_list[-1].strip()
+
+            try:
+                client_ip = ipaddress.ip_address(client_addr)
+            except ValueError:
+                app.logger.error('Invalid IP: %s', client_addr)
+                continue
+
+
+            if client_ip in admin_network:
+                app.logger.info('Matched client IP %s in admin network %s', str(client_ip), str(admin_network))
+                return True
+
+
+        app.logger.warning('Client IP %s not in any admin network', client_addr)
+        return False
 
 
 class TemplateView(BaseView):
@@ -411,9 +454,9 @@ class TemplateView(BaseView):
 
     def get_user_info(self):
         if not current_user.is_authenticated:
-            return '<a href="{0:s}">Login</a>'.format(url_for('auth_indi_allsky.login_view'))
+            return '<a href="{0:s}" style="text-decoration: none">Login</a>'.format(url_for('auth_indi_allsky.login_view'))
 
-        return '{0:s} <a href="{1:s}">*</a>'.format(current_user.username, url_for('auth_indi_allsky.logout_view'))
+        return '<a href="{0:s}" style="text-decoration: none">{1:s}</a>'.format(url_for('indi_allsky.user_view'), current_user.username)
 
 
 class FormView(TemplateView):

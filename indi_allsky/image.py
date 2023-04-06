@@ -140,9 +140,21 @@ class ImageWorker(Process):
         self._detection_mask = self._load_detection_mask()
         self._adu_mask = self._detection_mask  # reuse detection mask for ADU mask (if defined)
 
-
-        self.image_processor = ImageProcessor(self.config, latitude_v, longitude_v, ra_v, dec_v, exposure_v, gain_v, bin_v, sensortemp_v, night_v, moonmode_v, self.astrometric_data, mask=self._detection_mask)
-
+        self.image_processor = ImageProcessor(
+            self.config,
+            latitude_v,
+            longitude_v,
+            ra_v,
+            dec_v,
+            exposure_v,
+            gain_v,
+            bin_v,
+            sensortemp_v,
+            night_v,
+            moonmode_v,
+            self.astrometric_data,
+            mask=self._detection_mask,
+        )
 
         self._miscDb = miscDb(self.config)
 
@@ -391,6 +403,15 @@ class ImageWorker(Process):
             self.image_processor.contrast_clahe()
 
 
+        self.image_processor.colorize()
+
+
+        self.image_processor.apply_image_circle_mask()
+
+
+        self.image_processor.apply_logo_overlay()
+
+
         if self.config['IMAGE_SCALE'] and self.config['IMAGE_SCALE'] != 100:
             self.image_processor.scale_image()
 
@@ -538,11 +559,11 @@ class ImageWorker(Process):
                 upload_filename = latest_file
 
 
-            self.syncapi_image(image_entry, image_metadata)
+            self.s3_upload(image_entry, image_metadata)
+            self.syncapi(image_entry, image_metadata)
             self.mqtt_publish(upload_filename, mqtt_data)
             self.upload_image(i_ref, image_entry, camera)
             self.upload_metadata(i_ref, adu, adu_average)
-            self.upload_s3(image_entry)
 
 
     def upload_image(self, i_ref, image_entry, camera):
@@ -707,13 +728,13 @@ class ImageWorker(Process):
         self.upload_q.put({'task_id' : mqtt_task.id})
 
 
-    def upload_s3(self, image_entry):
+    def s3_upload(self, asset_entry, asset_metadata):
         if not self.config.get('S3UPLOAD', {}).get('ENABLE'):
             #logger.warning('S3 uploading disabled')
             return
 
 
-        if not image_entry:
+        if not asset_entry:
             #logger.warning('S3 uploading disabled')
             return
 
@@ -723,9 +744,10 @@ class ImageWorker(Process):
         # publish data to s3 bucket
         jobdata = {
             'action'      : constants.TRANSFER_S3,
-            'model'       : image_entry.__class__.__name__,
-            'id'          : image_entry.id,
+            'model'       : asset_entry.__class__.__name__,
+            'id'          : asset_entry.id,
             'asset_type'  : constants.ASSET_IMAGE,
+            'metadata'    : asset_metadata,
         }
 
         s3_task = IndiAllSkyDbTaskQueueTable(
@@ -739,13 +761,18 @@ class ImageWorker(Process):
         self.upload_q.put({'task_id' : s3_task.id})
 
 
-    def syncapi_image(self, image_entry, image_metadata):
+    def syncapi(self, asset_entry, asset_metadata):
         ### sync camera
         if not self.config.get('SYNCAPI', {}).get('ENABLE'):
             return
 
 
-        if not image_entry:
+        if self.config.get('SYNCAPI', {}).get('POST_S3'):
+            # file is uploaded after s3 upload
+            return
+
+
+        if not asset_entry:
             # image was not saved
             return
 
@@ -753,9 +780,9 @@ class ImageWorker(Process):
         # tell worker to upload file
         jobdata = {
             'action'      : constants.TRANSFER_SYNC_V1,
-            'model'       : image_entry.__class__.__name__,
-            'id'          : image_entry.id,
-            'metadata'    : image_metadata,
+            'model'       : asset_entry.__class__.__name__,
+            'id'          : asset_entry.id,
+            'metadata'    : asset_metadata,
         }
 
         upload_task = IndiAllSkyDbTaskQueueTable(
@@ -1061,7 +1088,6 @@ class ImageWorker(Process):
         latest_file = self.image_dir.joinpath('latest.{0:s}'.format(self.config['IMAGE_FILE_TYPE']))
 
         try:
-            # needs to be deleted in case file has other hard links (like below)
             latest_file.unlink()
         except FileNotFoundError:
             pass
@@ -1080,6 +1106,7 @@ class ImageWorker(Process):
         ### Do not write daytime image files if daytime timelapse is disabled
         if not self.night_v.value and not self.config['DAYTIME_TIMELAPSE']:
             logger.info('Daytime timelapse is disabled')
+            tmpfile_name.unlink()
             return latest_file, None
 
 
@@ -1093,6 +1120,7 @@ class ImageWorker(Process):
 
         if filename.exists():
             logger.error('File exists: %s (skipping)', filename)
+            tmpfile_name.unlink()
             return latest_file, None
 
 
@@ -1357,7 +1385,6 @@ class ImageWorker(Process):
         return mask_data
 
 
-
 class ImageProcessor(object):
 
     dark_temperature_range = 5.0  # dark must be within this range
@@ -1415,6 +1442,11 @@ class ImageProcessor(object):
         self._max_bit_depth = 8  # this will be scaled up (never down) as detected
 
         self._detection_mask = mask
+
+        self._image_circle_alpha_mask = None
+
+        self._overlay = None
+        self._alpha_mask = None
 
         self.focus_mode = self.config.get('FOCUS_MODE', False)
 
@@ -1860,6 +1892,11 @@ class ImageProcessor(object):
             master_dark = dark
 
 
+        if master_dark.shape != data.shape:
+            logger.error('Dark frame calibration dimensions mismatch')
+            raise CalibrationNotFound('Dark frame calibration dimension mismatch')
+
+
         data_calibrated = cv2.subtract(data, master_dark)
 
         return data_calibrated
@@ -2229,6 +2266,72 @@ class ImageProcessor(object):
         self.image = cv2.cvtColor(new_lab, cv2.COLOR_LAB2BGR)
 
 
+    def colorize(self):
+        if len(self.image.shape) == 3:
+            # already color
+            return
+
+        self.image = cv2.cvtColor(self.image, cv2.COLOR_GRAY2BGR)
+
+
+    def apply_image_circle_mask(self):
+        if not self.config.get('IMAGE_CIRCLE_MASK', {}).get('ENABLE'):
+            return
+
+        if isinstance(self._image_circle_alpha_mask, type(None)):
+            self._image_circle_alpha_mask = self._generate_image_circle_mask(self.image)
+
+
+        alpha_start = time.time()
+
+        self.image = (self.image * self._image_circle_alpha_mask).astype(numpy.uint8)
+
+
+        if self.config.get('IMAGE_CIRCLE_MASK', {}).get('OUTLINE'):
+            image_height, image_width = self.image.shape[:2]
+
+            center_x = int(image_width / 2) + self.config['IMAGE_CIRCLE_MASK']['OFFSET_X']
+            center_y = int(image_height / 2) - self.config['IMAGE_CIRCLE_MASK']['OFFSET_Y']  # minus
+            radius = int(self.config['IMAGE_CIRCLE_MASK']['DIAMETER'] / 2)
+
+            cv2.circle(
+                img=self.image,
+                center=(center_x, center_y),
+                radius=radius,
+                color=(64, 64, 64),
+                thickness=3,
+            )
+
+
+        alpha_elapsed_s = time.time() - alpha_start
+        logger.info('Image circle mask in %0.4f s', alpha_elapsed_s)
+
+
+    def apply_logo_overlay(self):
+        logo_overlay = self.config.get('LOGO_OVERLAY', '')
+        if not logo_overlay:
+            return
+
+
+        if isinstance(self._overlay, type(None)):
+            self._overlay, self._alpha_mask = self._load_logo_overlay(self.image)
+
+            if isinstance(self._overlay, bool):
+                return
+
+        elif isinstance(self._overlay, bool):
+            logger.error('Logo overlay failed to load')
+            return
+
+
+        alpha_start = time.time()
+
+        self.image = self.image * (1 - self._alpha_mask) + self._overlay * self._alpha_mask
+
+        alpha_elapsed_s = time.time() - alpha_start
+        logger.info('Alpha transparency in %0.4f s', alpha_elapsed_s)
+
+
     #def equalizeHistogram(self, data):
     #    if self.focus_mode:
     #        # disable processing in focus mode
@@ -2589,4 +2692,104 @@ class ImageProcessor(object):
 
         return extra_lines
 
+
+    def _load_logo_overlay(self, image):
+        logo_overlay = self.config.get('LOGO_OVERLAY', '')
+
+        if not logo_overlay:
+            logger.warning('No logo overlay defined')
+            return None, None
+
+
+        logo_overlay_p = Path(logo_overlay)
+
+        try:
+            if not logo_overlay_p.exists():
+                logger.error('%s does not exist', logo_overlay_p)
+                return None, None
+
+
+            if not logo_overlay_p.is_file():
+                logger.error('%s is not a file', logo_overlay_p)
+                return None, None
+
+        except PermissionError as e:
+            logger.error(str(e))
+            return None, None
+
+        overlay_img = cv2.imread(str(logo_overlay_p), cv2.IMREAD_UNCHANGED)
+        if isinstance(overlay_img, type(None)):
+            logger.error('%s is not a valid image', logo_overlay_p)
+            return False, None  # False so the image is not retried
+
+
+        if overlay_img.shape[:2] != image.shape[:2]:
+            logger.error('Logo dimensions do not match image')
+            return False, None  # False so the image is not retried
+
+
+        try:
+            if overlay_img.shape[2] != 4:
+                logger.error('%s does not have an alpha channel')
+                return False, None  # False so the image is not retried
+        except IndexError:
+            logger.error('%s does not have an alpha channel')
+            return False, None  # False so the image is not retried
+
+
+        overlay_rgb = overlay_img[:, :, :3]
+        overlay_alpha = (overlay_img[:, :, 3] / 255).astype(numpy.float32)
+
+
+        alpha_mask = numpy.dstack((overlay_alpha, overlay_alpha, overlay_alpha))
+
+
+        return overlay_rgb, alpha_mask
+
+
+    def _generate_image_circle_mask(self, image):
+        image_height, image_width = image.shape[:2]
+
+
+        opacity = self.config['IMAGE_CIRCLE_MASK']['OPACITY']
+        if self.config['IMAGE_CIRCLE_MASK']['OUTLINE']:
+            logger.warning('Opacity disabled for image circle outline')
+            opacity = 0
+
+
+        background = int(255 * (100 - opacity) / 100)
+        #logger.info('Image circle backgound: %d', background)
+
+        channel_mask = numpy.full([image_height, image_width], background, dtype=numpy.uint8)
+
+        center_x = int(image_width / 2) + self.config['IMAGE_CIRCLE_MASK']['OFFSET_X']
+        center_y = int(image_height / 2) - self.config['IMAGE_CIRCLE_MASK']['OFFSET_Y']  # minus
+        radius = int(self.config['IMAGE_CIRCLE_MASK']['DIAMETER'] / 2)
+        blur = self.config['IMAGE_CIRCLE_MASK']['BLUR']
+
+
+        # draw a white circle
+        cv2.circle(
+            img=channel_mask,
+            center=(center_x, center_y),
+            radius=radius,
+            color=(255),
+            thickness=cv2.FILLED,
+        )
+
+
+        if blur:
+            # blur circle
+            channel_mask = cv2.blur(
+                src=channel_mask,
+                ksize=(blur, blur),
+                borderType=cv2.BORDER_DEFAULT,
+            )
+
+
+        channel_alpha = (channel_mask / 255).astype(numpy.float32)
+
+        alpha_mask = numpy.dstack((channel_alpha, channel_alpha, channel_alpha))
+
+        return alpha_mask
 

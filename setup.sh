@@ -256,7 +256,7 @@ while [ -z "${CAMERA_INTERFACE:-}" ]; do
     if [ "$CAMERA_INTERFACE" == "libcamera" ]; then
         echo
         PS3="Select a libcamera interface: "
-        select libcamera_interface in libcamera_imx477 libcamera_imx378 libcamera_imx708 libcamera_imx290 libcamera_imx462 libcamera_64mp_hawkeye; do
+        select libcamera_interface in libcamera_imx477 libcamera_imx378 libcamera_imx519 libcamera_imx708 libcamera_imx290 libcamera_imx462 libcamera_64mp_hawkeye; do
             if [ -n "$libcamera_interface" ]; then
                 # overwrite variable
                 CAMERA_INTERFACE=$libcamera_interface
@@ -320,7 +320,7 @@ if [[ "$DISTRO_NAME" == "Raspbian" && "$DISTRO_RELEASE" == "11" ]]; then
         if [[ ! -f "${INDI_DRIVER_PATH}/indiserver" && ! -f "/usr/local/bin/indiserver" && ! -f "/etc/apt/sources.list.d/astroberry.list" ]]; then
             echo "Installing INDI via Astroberry repository"
             wget -O - https://www.astroberry.io/repo/key | sudo apt-key add -
-            sudo su -c "echo 'deb https://www.astroberry.io/repo/ bullseye main' > /etc/apt/sources.list.d/astroberry.list"
+            echo "deb https://www.astroberry.io/repo/ bullseye main" | sudo tee /etc/apt/sources.list.d/astroberry.list
         fi
     else
         INSTALL_INDI="false"
@@ -466,7 +466,7 @@ elif [[ "$DISTRO_NAME" == "Raspbian" && "$DISTRO_RELEASE" == "10" ]]; then
         if [[ ! -f "${INDI_DRIVER_PATH}/indiserver" && ! -f "/usr/local/bin/indiserver" && ! -f "/etc/apt/sources.list.d/astroberry.list" ]]; then
             echo "Installing INDI via Astroberry repository"
             wget -O - https://www.astroberry.io/repo/key | sudo apt-key add -
-            sudo su -c "echo 'deb https://www.astroberry.io/repo/ buster main' > /etc/apt/sources.list.d/astroberry.list"
+            echo "deb https://www.astroberry.io/repo/ buster main" | sudo tee /etc/apt/sources.list.d/astroberry.list
         fi
     fi
 
@@ -598,7 +598,7 @@ elif [[ "$DISTRO_NAME" == "Debian" && "$DISTRO_RELEASE" == "11" ]]; then
         if [[ ! -f "${INDI_DRIVER_PATH}/indiserver" && ! -f "/usr/local/bin/indiserver" && ! -f "/etc/apt/sources.list.d/astroberry.list" ]]; then
             echo "Installing INDI via Astroberry repository"
             wget -O - https://www.astroberry.io/repo/key | sudo apt-key add -
-            sudo su -c "echo 'deb https://www.astroberry.io/repo/ bullseye main' > /etc/apt/sources.list.d/astroberry.list"
+            echo "deb https://www.astroberry.io/repo/ bullseye main" | sudo tee /etc/apt/sources.list.d/astroberry.list
         fi
     else
         INSTALL_INDI="false"
@@ -735,7 +735,7 @@ elif [[ "$DISTRO_NAME" == "Debian" && "$DISTRO_RELEASE" == "10" ]]; then
         if [[ ! -f "${INDI_DRIVER_PATH}/indiserver" && ! -f "/usr/local/bin/indiserver" && ! -f "/etc/apt/sources.list.d/astroberry.list" ]]; then
             echo "Installing INDI via Astroberry repository"
             wget -O - https://www.astroberry.io/repo/key | sudo apt-key add -
-            sudo su -c "echo 'deb https://www.astroberry.io/repo/ buster main' > /etc/apt/sources.list.d/astroberry.list"
+            echo "deb https://www.astroberry.io/repo/ buster main" | sudo tee /etc/apt/sources.list.d/astroberry.list
         fi
     else
         INSTALL_INDI="false"
@@ -1931,10 +1931,14 @@ else
         sudo a2enmod rewrite
         sudo a2enmod headers
         sudo a2enmod ssl
+        #sudo a2enmod http2
         sudo a2enmod proxy
         sudo a2enmod proxy_http
+        #sudo a2enmod proxy_http2
+
         sudo a2dissite 000-default
         sudo a2dissite default-ssl
+
         sudo a2ensite indi-allsky
 
         if [[ ! -f "/etc/apache2/ports.conf_pre_indiallsky" ]]; then
@@ -2095,7 +2099,7 @@ if [ "$MEM_TOTAL" -lt "768000" ]; then
 fi
 
 # 25% ffmpeg scaling with libcamera when running 1GB of memory
-if [[ "$CAMERA_INTERFACE" == "libcamera_imx477" || "$CAMERA_INTERFACE" == "libcamera_imx378" || "$CAMERA_INTERFACE" == "libcamera_imx708" || "$CAMERA_INTERFACE" == "libcamera_64mp_hawkeye" ]]; then
+if [[ "$CAMERA_INTERFACE" == "libcamera_imx477" || "$CAMERA_INTERFACE" == "libcamera_imx378" || "$CAMERA_INTERFACE" == "libcamera_imx519" || "$CAMERA_INTERFACE" == "libcamera_imx708" || "$CAMERA_INTERFACE" == "libcamera_64mp_hawkeye" ]]; then
     if [ "$MEM_TOTAL" -lt "1536000" ]; then
         TMP_LIBCAM_FFMPEG=$(mktemp --suffix=.json)
         jq --arg ffmpeg_vfscale "iw*.25:ih*.25" '.FFMPEG_VFSCALE = $ffmpeg_vfscale' "$TMP_CONFIG_DUMP" > "$TMP_LIBCAM_FFMPEG"

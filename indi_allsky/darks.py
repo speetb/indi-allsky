@@ -29,6 +29,8 @@ from .config import IndiAllSkyConfig
 
 from . import camera as camera_module
 
+from . import constants
+
 from .flask import create_app
 from .flask import db
 from .flask.miscDb import miscDb
@@ -224,9 +226,16 @@ class IndiAllSkyDarks(object):
         self.ccd_info = ccd_info
 
 
+        if self.config.get('CFA_PATTERN'):
+            cfa_pattern = self.config['CFA_PATTERN']
+        else:
+            cfa_pattern = ccd_info['CCD_CFA']['CFA_TYPE'].get('text')
+
+
         # need to get camera info before adding to DB
         camera_metadata = {
             'name'        : self.camera_name,
+
             'minExposure' : float(ccd_info.get('CCD_EXPOSURE', {}).get('CCD_EXPOSURE_VALUE', {}).get('min')),
             'maxExposure' : float(ccd_info.get('CCD_EXPOSURE', {}).get('CCD_EXPOSURE_VALUE', {}).get('max')),
             'minGain'     : int(ccd_info.get('GAIN_INFO', {}).get('min')),
@@ -235,13 +244,28 @@ class IndiAllSkyDarks(object):
             'height'      : int(ccd_info.get('CCD_FRAME', {}).get('HEIGHT', {}).get('max')),
             'bits'        : int(ccd_info.get('CCD_INFO', {}).get('CCD_BITSPERPIXEL', {}).get('current')),
             'pixelSize'   : float(ccd_info.get('CCD_INFO', {}).get('CCD_PIXEL_SIZE', {}).get('current')),
+            'cfa'         : constants.CFA_STR_MAP[cfa_pattern],
+
+            'location'    : self.config['LOCATION_NAME'],
+            'latitude'    : self.latitude_v.value,
+            'longitude'   : self.longitude_v.value,
+
+            'lensName'        : self.config['LENS_NAME'],
+            'lensFocalLength' : self.config['LENS_FOCAL_LENGTH'],
+            'lensFocalRatio'  : self.config['LENS_FOCAL_RATIO'],
+            'alt'             : self.config['LENS_ALTITUDE'],
+            'az'              : self.config['LENS_AZIMUTH'],
+            'nightSunAlt'     : self.config['NIGHT_SUN_ALT_DEG'],
         }
 
         db_camera = self._miscDb.addCamera(camera_metadata)
         self.camera_id = db_camera.id
 
-        # Disable debugging
-        self.indiclient.disableDebugCcd()
+        try:
+            # Disable debugging
+            self.indiclient.disableDebugCcd()
+        except TimeOutException:
+            logger.warning('Camera does not support debug')
 
         # set BLOB mode to BLOB_ALSO
         self.indiclient.updateCcdBlobMode()
@@ -681,12 +705,13 @@ class IndiAllSkyDarks(object):
             m_avg = numpy.mean(hdulist[0].data, axis=1)[0]
             logger.info('Image average adu: %0.2f', m_avg)
 
+            self.getSensorTemperature()
+            logger.info('Sensor temperature: %0.2f', self.sensortemp_v.value)
+
             i += 1  # increment
 
 
         # libcamera does not know the temperature until the first exposure is taken
-        self.getSensorTemperature()
-
         exp_date = datetime.now()
         date_str = exp_date.strftime('%Y%m%d_%H%M%S')
         dark_filename = dark_filename_t.format(
@@ -720,6 +745,7 @@ class IndiAllSkyDarks(object):
         s.stack(tmp_fit_dir_p, full_dark_filename_p, exposure_f, image_bitpix)
 
         dark_metadata = {
+            'type'       : constants.DARK_FRAME,
             'createDate' : exp_date.timestamp(),
             'bitdepth'   : image_bitpix,
             'exposure'   : exposure_f,
@@ -727,6 +753,17 @@ class IndiAllSkyDarks(object):
             'binmode'    : self.bin_v.value,
             'temp'       : self.sensortemp_v.value,
         }
+
+        bpm_metadata = {
+            'type'       : constants.BPM_FRAME,
+            'createDate' : exp_date.timestamp(),
+            'bitdepth'   : image_bitpix,
+            'exposure'   : exposure_f,
+            'gain'       : self.gain_v.value,
+            'binmode'    : self.bin_v.value,
+            'temp'       : self.sensortemp_v.value,
+        }
+
 
         self._miscDb.addBadPixelMap(
             full_bpm_filename_p,
@@ -737,7 +774,7 @@ class IndiAllSkyDarks(object):
         self._miscDb.addDarkFrame(
             full_dark_filename_p,
             self.camera_id,
-            dark_metadata,
+            bpm_metadata,
         )
 
         tmp_fit_dir.cleanup()
