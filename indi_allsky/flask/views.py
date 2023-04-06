@@ -390,7 +390,7 @@ class JsonImageLoopView(JsonView):
         self.history_seconds = 900
         self.sqm_history_minutes = 30
         self.stars_history_minutes = 30
-        self.limit = 1000  # sanity check
+        self.limit = 6000  # sanity check
 
 
     def get_objects(self):
